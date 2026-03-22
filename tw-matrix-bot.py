@@ -20,6 +20,7 @@ Listens for commands in Matrix DMs and runs Taskwarrior queries/adds.
 Usage:
   python3 tw-matrix-bot.py           # run bot (uses saved credentials)
   python3 tw-matrix-bot.py --login   # first-time login, saves access token
+  python3 tw-matrix-bot.py --debug   # run with debug logging to stderr + log file
 
 Commands (send in DM to bot):
   help               this message
@@ -212,7 +213,7 @@ def handle_command(body: str, cfg: dict) -> str:
 # ── Bot ───────────────────────────────────────────────────────────────────────
 
 async def run_bot(cfg: dict, creds: dict):
-    from nio import AsyncClient, RoomMessageText, InviteEvent
+    from nio import AsyncClient, RoomMessageText, InviteEvent, InviteMemberEvent
 
     allowed = {u.strip() for u in cfg['allowed_users'].split(',') if u.strip()}
 
@@ -222,11 +223,13 @@ async def run_bot(cfg: dict, creds: dict):
     client.user_id      = cfg['bot_user']
 
     async def on_message(room, event):
+        debug_log(f'message from {event.sender} in {room.room_id}: {event.body!r}')
         if not isinstance(event, RoomMessageText):
             return
         if event.sender == cfg['bot_user']:
             return
         if allowed and event.sender not in allowed:
+            debug_log(f'ignored: {event.sender} not in allowed_users')
             return
         reply = handle_command(event.body, cfg)
         await client.room_send(
@@ -235,16 +238,50 @@ async def run_bot(cfg: dict, creds: dict):
             content      = {'msgtype': 'm.text', 'body': reply},
         )
 
-    async def on_invite(room_id, event):
+    pending_joins = set()
+
+    async def on_invite(room, event):
+        room_id = room.room_id if hasattr(room, 'room_id') else room
+        debug_log(f'invite from {event.sender} to {room_id}')
         if allowed and event.sender not in allowed:
+            debug_log(f'invite ignored: {event.sender} not in allowed_users')
             return
-        await client.join(room_id)
+        pending_joins.add(room_id)
+        asyncio.create_task(do_pending_joins())
+
+    async def do_pending_joins():
+        from nio import JoinError
+        for room_id in list(pending_joins):
+            debug_log(f'joining {room_id}')
+            resp = await client.join(room_id)
+            if isinstance(resp, JoinError):
+                debug_log(f'join failed: {resp.message} — declining')
+                await client.room_leave(room_id)
+            else:
+                debug_log(f'joined: {resp.room_id}')
+            pending_joins.discard(room_id)
+
+    from nio import Event as NioEvent
+    async def on_any(room, event):
+        debug_log(f'event: {type(event).__name__} from {event.sender} in {room.room_id}')
 
     client.add_event_callback(on_message, RoomMessageText)
+    client.add_event_callback(on_any,     NioEvent)
     client.add_event_callback(on_invite,  InviteEvent)
+    client.add_event_callback(on_invite,  InviteMemberEvent)
 
     print(f'[tw-matrix-bot] v{VERSION} running as {cfg["bot_user"]}')
     print(f'[tw-matrix-bot] allowed users: {cfg["allowed_users"] or "(anyone)"}')
+
+    # Initial sync — collect pending invites, then join after sync completes
+    await client.sync(timeout=30_000, full_state=True)
+    # Also pick up any invites not caught by callback
+    for room_id in client.invited_rooms:
+        pending_joins.add(room_id)
+    await do_pending_joins()
+    debug_log(f'joined rooms: {list(client.rooms.keys())}')
+
+    debug_log('sync_forever starting...')
     await client.sync_forever(timeout=30_000, full_state=True)
 
 
@@ -271,6 +308,29 @@ async def do_login(cfg: dict):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
+    global debug_active, DEBUG_LOG_DIR, DEBUG_SESSION_ID, DEBUG_LOG_FILE, debug_log
+
+    if '--debug' in sys.argv:
+        import atexit
+        sys.argv.remove('--debug')
+        debug_active = True
+        DEBUG_LOG_DIR = get_log_dir()
+        DEBUG_SESSION_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
+        script_name = Path(__file__).stem
+        DEBUG_LOG_FILE = DEBUG_LOG_DIR / f"{script_name}_debug_{DEBUG_SESSION_ID}.log"
+        with open(DEBUG_LOG_FILE, "w") as f:
+            f.write("=" * 70 + "\n")
+            f.write(f"Debug Session - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Script: {script_name}\n")
+            f.write("=" * 70 + "\n\n")
+        def debug_log(message, level=1):
+            timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            log_line = f"{timestamp} [DEBUG-{level}] {message}\n"
+            with open(DEBUG_LOG_FILE, "a") as f:
+                f.write(log_line)
+            print(f"\033[34m[DEBUG-{level}]\033[0m {message}", file=sys.stderr)
+        debug_log(f"Debug logging initialized: {DEBUG_LOG_FILE}", 1)
+
     cfg = load_config()
 
     if not cfg['bot_user']:

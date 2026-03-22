@@ -2,7 +2,7 @@
 # Copy to ~/.task/config/tw-matrix-bot.rc and edit before first run.
 
 # Matrix homeserver (use matrix.org or your own)
-homeserver=https://matrix.org
+homeserver=https://matrix-client.matrix.org
 
 # Bot's Matrix user ID (create a dedicated account for the bot)
 bot_user=@task-bot:matrix.org
