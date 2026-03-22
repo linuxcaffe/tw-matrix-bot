@@ -1,5 +1,5 @@
-# tw-matrix-bot.rc — configuration for tw-matrix-bot
-# Copy to ~/.task/config/tw-matrix-bot.rc and edit before first run.
+# matrix-taskbot.rc — configuration for matrix-taskbot
+# Copy to ~/.task/config/matrix-taskbot.rc and edit before first run.
 
 # Matrix homeserver (use matrix.org or your own)
 homeserver=https://matrix-client.matrix.org
