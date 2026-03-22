@@ -101,12 +101,12 @@ else:
 # Original Code
 # ============================================================================
 
-VERSION     = '0.1.1'
+VERSION     = '0.1.2'
 CONFIG_FILE = Path.home() / '.task' / 'config' / 'matrix-taskbot.rc'
 CREDS_FILE  = Path.home() / '.task' / 'config' / '.matrix-taskbot.creds'
 
 HELP_TEXT = f"""\
-tw-matrix-bot v{VERSION} — Taskwarrior from Matrix
+matrix-taskbot v{VERSION} — Taskwarrior from Matrix
 
   help               this message
   list [filter]      task [filter] list
@@ -272,8 +272,8 @@ async def run_bot(cfg: dict, creds: dict):
     client.add_event_callback(on_invite,  InviteEvent)
     client.add_event_callback(on_invite,  InviteMemberEvent)
 
-    print(f'[tw-matrix-bot] v{VERSION} running as {cfg["bot_user"]}')
-    print(f'[tw-matrix-bot] allowed users: {cfg["allowed_users"] or "(anyone)"}')
+    print(f'[matrix-taskbot] v{VERSION} running as {cfg["bot_user"]}')
+    print(f'[matrix-taskbot] allowed users: {cfg["allowed_users"] or "(anyone)"}')
 
     # Initial sync — collect pending invites, then join after sync completes
     await client.sync(timeout=30_000, full_state=True)
@@ -303,7 +303,7 @@ async def do_login(cfg: dict):
         sys.exit(1)
 
     save_creds(resp.access_token, resp.device_id)
-    print(f'[tw-matrix-bot] Logged in. Credentials saved to {CREDS_FILE}')
+    print(f'[matrix-taskbot] Logged in. Credentials saved to {CREDS_FILE}')
     await client.close()
 
 
@@ -351,7 +351,7 @@ def main():
     try:
         asyncio.run(run_bot(cfg, creds))
     except KeyboardInterrupt:
-        print('\n[tw-matrix-bot] stopped')
+        print('\n[matrix-taskbot] stopped')
 
 
 if __name__ == '__main__':
