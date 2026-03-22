@@ -1,0 +1,18 @@
+# tw-matrix-bot.rc — configuration for tw-matrix-bot
+# Copy to ~/.task/config/tw-matrix-bot.rc and edit before first run.
+
+# Matrix homeserver (use matrix.org or your own)
+homeserver=https://matrix.org
+
+# Bot's Matrix user ID (create a dedicated account for the bot)
+bot_user=@tw-bot:matrix.org
+
+# Your Matrix user ID — bot will only respond to messages from these users
+# Comma-separated for multiple users
+allowed_users=@you:matrix.org
+
+# Max lines of task output to send per reply (avoid flooding)
+max_output=40
+
+# Path to task binary (default: task)
+task=task
