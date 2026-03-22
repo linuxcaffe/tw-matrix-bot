@@ -5,11 +5,11 @@
 homeserver=https://matrix.org
 
 # Bot's Matrix user ID (create a dedicated account for the bot)
-bot_user=@tw-bot:matrix.org
+bot_user=@task-bot:matrix.org
 
 # Your Matrix user ID — bot will only respond to messages from these users
 # Comma-separated for multiple users
-allowed_users=@you:matrix.org
+allowed_users=@linuxcaffe:matrix.org
 
 # Max lines of task output to send per reply (avoid flooding)
 max_output=40
