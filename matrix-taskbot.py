@@ -101,7 +101,7 @@ else:
 # Original Code
 # ============================================================================
 
-VERSION     = '0.1.3'
+VERSION     = '0.1.4'
 CONFIG_FILE = Path.home() / '.task' / 'config' / 'matrix-taskbot.rc'
 CREDS_FILE  = Path.home() / '.task' / 'config' / '.matrix-taskbot.creds'
 
@@ -199,18 +199,31 @@ def handle_command(body: str, cfg: dict) -> str:
     if lower in ('help', '?', 'h'):
         return HELP_TEXT
 
+    if lower in ('next', 'n'):
+        return run_task(task, ['next'], maxl)
+
+    if lower.startswith('add '):
+        rest = body[4:].strip()
+        if not rest:
+            return 'Usage: add <description> [+tag] [project:foo] [due:tomorrow]'
+        return run_task(task, ['add'] + rest.split(), maxl, hooks=True)
+
+    if lower.startswith('list') or lower.startswith('ls'):
+        parts = body.split(None, 1)
+        filter_args = parts[1].split() if len(parts) > 1 else []
+        return run_task(task, filter_args + ['list'], maxl)
+
     # bare number → task info
     if body.isdigit():
         return run_task(task, [body, 'information'], maxl)
 
-    # detect write vs read for hook control
+    # write verbs: hooks on, pass straight through
     first = lower.split()[0] if lower.split() else ''
-    hooks = first in WRITE_VERBS
+    if first in WRITE_VERBS:
+        return run_task(task, body.split(), maxl, hooks=True)
 
-    # passthrough: send args straight to task, let taskwarrior decide
-    # covers: add, modify, done, delete, log, annotate, named reports,
-    #         filters, context, list/ls, next, etc.
-    return run_task(task, body.split(), maxl, hooks=hooks)
+    # fallback: treat as filter + list
+    return run_task(task, body.split() + ['list'], maxl)
 
 
 # ── Bot ───────────────────────────────────────────────────────────────────────
