@@ -101,7 +101,7 @@ else:
 # Original Code
 # ============================================================================
 
-VERSION     = '0.1.4'
+VERSION     = '0.1.5'
 CONFIG_FILE = Path.home() / '.task' / 'config' / 'matrix-taskbot.rc'
 CREDS_FILE  = Path.home() / '.task' / 'config' / '.matrix-taskbot.creds'
 
@@ -161,11 +161,10 @@ def save_creds(access_token: str, device_id: str):
 # ── Task runner ───────────────────────────────────────────────────────────────
 
 def run_task(task_bin: str, args: list, max_lines: int = 40, hooks: bool = False) -> str:
-    rc_hooks  = 'rc.hooks=on'  if hooks else 'rc.hooks=off'
-    rc_verb   = 'rc.verbose=label,blank,new-id,affected'
+    rc_hooks = 'rc.hooks=on' if hooks else 'rc.hooks=off'
     try:
         result = subprocess.run(
-            [task_bin, rc_hooks, 'rc.color=off', rc_verb, 'rc.confirmation=off']
+            [task_bin, rc_hooks, 'rc.color=off', 'rc.verbose=label,blank']
             + args,
             capture_output=True, text=True, timeout=15,
         )
