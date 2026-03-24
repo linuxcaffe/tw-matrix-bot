@@ -101,18 +101,21 @@ else:
 # Original Code
 # ============================================================================
 
-VERSION     = '0.1.2'
+VERSION     = '0.1.3'
 CONFIG_FILE = Path.home() / '.task' / 'config' / 'matrix-taskbot.rc'
 CREDS_FILE  = Path.home() / '.task' / 'config' / '.matrix-taskbot.creds'
 
 HELP_TEXT = f"""\
 matrix-taskbot v{VERSION} — Taskwarrior from Matrix
 
-  help               this message
-  list [filter]      task [filter] list
-  next               task next
-  add <description>  task add (pass tags, projects etc. as normal)
   <id>               task <id> information
+  <report>           any named report (next, work, home, …)
+  <filter>           any filter (+tag, project:foo, …)
+  add <desc>         add task (tags, project, due etc. as normal)
+  modify …           modify tasks
+  done / delete …    complete or delete tasks
+  log / annotate …   log or annotate tasks
+  help               this message
 """.strip()
 
 
@@ -181,6 +184,12 @@ def run_task(task_bin: str, args: list, max_lines: int = 40, hooks: bool = False
 
 # ── Command parser ────────────────────────────────────────────────────────────
 
+WRITE_VERBS = {
+    'add', 'done', 'delete', 'modify', 'start', 'stop',
+    'log', 'annotate', 'append', 'prepend', 'denotate',
+    'duplicate', 'purge', 'undo',
+}
+
 def handle_command(body: str, cfg: dict) -> str:
     body  = body.strip()
     lower = body.lower()
@@ -190,26 +199,18 @@ def handle_command(body: str, cfg: dict) -> str:
     if lower in ('help', '?', 'h'):
         return HELP_TEXT
 
-    if lower in ('next', 'n'):
-        return run_task(task, ['next'], maxl)
-
-    if lower.startswith('add '):
-        rest = body[4:].strip()
-        if not rest:
-            return 'Usage: add <description> [+tag] [project:foo] [due:tomorrow]'
-        return run_task(task, ['add'] + rest.split(), maxl, hooks=True)
-
-    if lower.startswith('list') or lower.startswith('ls'):
-        parts = body.split(None, 1)
-        filter_args = parts[1].split() if len(parts) > 1 else []
-        return run_task(task, filter_args + ['list'], maxl)
-
     # bare number → task info
     if body.isdigit():
         return run_task(task, [body, 'information'], maxl)
 
-    # fallback: treat as filter + list
-    return run_task(task, body.split() + ['list'], maxl)
+    # detect write vs read for hook control
+    first = lower.split()[0] if lower.split() else ''
+    hooks = first in WRITE_VERBS
+
+    # passthrough: send args straight to task, let taskwarrior decide
+    # covers: add, modify, done, delete, log, annotate, named reports,
+    #         filters, context, list/ls, next, etc.
+    return run_task(task, body.split(), maxl, hooks=hooks)
 
 
 # ── Bot ───────────────────────────────────────────────────────────────────────
