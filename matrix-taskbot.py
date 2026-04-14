@@ -43,6 +43,7 @@ Install:
 
 import os
 import sys
+import math
 from pathlib import Path
 from datetime import datetime
 import asyncio
@@ -61,11 +62,8 @@ except ValueError:
 debug_active = DEBUG_MODE == 1 or tw_debug_level >= 2
 
 def get_log_dir():
-    cwd = Path.cwd()
-    if (cwd / '.git').exists():
-        log_dir = cwd / 'logs' / 'debug'
-    else:
-        log_dir = Path.home() / '.task' / 'logs' / 'debug'
+    """Always log to ~/.task/logs/debug/"""
+    log_dir = Path.home() / '.task' / 'logs' / 'debug'
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir
 
@@ -101,7 +99,7 @@ else:
 # Original Code
 # ============================================================================
 
-VERSION     = '0.1.5'
+VERSION     = '0.1.9'
 CONFIG_FILE = Path.home() / '.task' / 'config' / 'matrix-taskbot.rc'
 CREDS_FILE  = Path.home() / '.task' / 'config' / '.matrix-taskbot.creds'
 
@@ -116,6 +114,19 @@ matrix-taskbot v{VERSION} — Taskwarrior from Matrix
   done / delete …    complete or delete tasks
   log / annotate …   log or annotate tasks
   help               this message
+
+Context shortcuts:
+  @                  show current context
+  @name              switch to context
+  @0                 clear context
+  @+name             add context to cmx set  (requires tw)
+  @-name             remove context from cmx set  (requires tw)
+
+Dot shortcuts (resolve to most recent task):
+  .                  most recently added task    (e.g. ". done")
+  ..                 most recently modified task
+  ...                most recently completed task
+  ....               most recently deleted task
 """.strip()
 
 
@@ -123,11 +134,13 @@ matrix-taskbot v{VERSION} — Taskwarrior from Matrix
 
 def load_config() -> dict:
     cfg = {
-        'homeserver':    'https://matrix.org',
-        'bot_user':      '',
-        'allowed_users': '',
-        'max_output':    '40',
-        'task':          'task',
+        'homeserver':       'https://matrix.org',
+        'bot_user':         '',
+        'bot_name':         '',        # display name base; defaults to localpart of bot_user
+        'allowed_users':    '',
+        'max_output':       '40',
+        'task':             'task',
+        'location_context': 'yes',    # enable location-based context switching
     }
     if not CONFIG_FILE.exists():
         return cfg
@@ -181,6 +194,119 @@ def run_task(task_bin: str, args: list, max_lines: int = 40, hooks: bool = False
         return f'[error] {e}'
 
 
+# ── tw shortcuts ─────────────────────────────────────────────────────────────
+
+TW_BIN = Path.home() / '.task' / 'scripts' / 'tw'
+
+DOT_LABELS = {
+    '.':    'most recently added task',
+    '..':   'most recently modified task',
+    '...':  'most recently completed task',
+    '....': 'most recently deleted task',
+}
+
+def resolve_dot(dot: str, task_bin: str) -> tuple[str | None, str]:
+    """Resolve a dot-shortcut to a task ID or short UUID.
+    Returns (resolved_id, human_label) or (None, error_message).
+    """
+    if dot == '.':
+        result = subprocess.run(
+            [task_bin, 'rc.hooks=off', 'rc.context:none', 'rc.verbose:nothing',
+             'newest', 'limit:1'],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.strip().splitlines():
+            parts = line.strip().split()
+            if parts and parts[0].isdigit():
+                return parts[0], f'. → task {parts[0]}'
+        return None, '[dot] no recent task found'
+
+    if dot == '..':
+        result = subprocess.run(
+            [task_bin, 'rc.hooks=off', 'rc.context:none', 'rc.verbose:nothing',
+             'status:pending', 'export'],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            tasks = json.loads(result.stdout)
+            tasks.sort(key=lambda t: t.get('modified', ''), reverse=True)
+            if tasks:
+                tid = str(tasks[0].get('id', ''))
+                if tid and tid != '0':
+                    return tid, f'.. → task {tid}'
+        return None, '[dot] no recently modified task found'
+
+    if dot in ('...', '....'):
+        status = 'completed' if dot == '...' else 'deleted'
+        result = subprocess.run(
+            [task_bin, 'rc.hooks=off', 'rc.context:none', 'rc.verbose:nothing',
+             f'status:{status}', 'export'],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            tasks = json.loads(result.stdout)
+            tasks.sort(key=lambda t: t.get('end', ''), reverse=True)
+            if tasks:
+                uuid = tasks[0].get('uuid', '')[:8]
+                if uuid:
+                    return uuid, f'{dot} → {status} task {uuid}'
+        return None, f'[dot] no recent {status} task found'
+
+    return None, f'[dot] unknown shortcut: {dot}'
+
+
+def handle_at_command(body: str, task_bin: str) -> str:
+    """Handle @ context shortcuts."""
+    # strip leading @ and split
+    rest = body[1:].strip()   # '' for bare '@', 'name' for '@name', etc.
+
+    # bare @ or @? — show current context
+    if rest in ('', '?'):
+        ctx = subprocess.run(
+            [task_bin, 'rc.hooks=off', 'rc.color=off', 'rc.verbose=', 'context', 'show'],
+            capture_output=True, text=True, timeout=10,
+        )
+        out = (ctx.stdout + ctx.stderr).strip()
+        return out or '(no active context)'
+
+    # @0 — clear context
+    if rest == '0':
+        subprocess.run(
+            [task_bin, 'rc.hooks=off', 'context', 'none'],
+            capture_output=True, timeout=10,
+        )
+        return 'Context cleared'
+
+    # @+name / @-name — cmx add/remove via tw
+    if rest.startswith('+') or rest.startswith('-'):
+        op   = rest[0]
+        name = rest[1:].strip()
+        if not name:
+            return f'Usage: @{op}<contextname>'
+        if not TW_BIN.exists():
+            return f'[error] @{op} requires tw ({TW_BIN})'
+        result = subprocess.run(
+            ['python3', str(TW_BIN), f'@{op}{name}'],
+            capture_output=True, text=True, timeout=15,
+        )
+        out = (result.stdout + result.stderr).strip()
+        # Follow up with context show so the user sees the new state
+        ctx = subprocess.run(
+            [task_bin, 'rc.hooks=off', 'rc.color=off', 'rc.verbose=', 'context', 'show'],
+            capture_output=True, text=True, timeout=10,
+        )
+        ctx_out = (ctx.stdout + ctx.stderr).strip()
+        return '\n'.join(filter(None, [out, ctx_out])) or '(done)'
+
+    # @name — switch to named context
+    result = subprocess.run(
+        [task_bin, 'rc.hooks=off', 'rc.color=off', 'context', rest],
+        capture_output=True, text=True, timeout=10,
+    )
+    out = (result.stdout + result.stderr).strip()
+    return out or f'Context → {rest}'
+
+
 # ── Command parser ────────────────────────────────────────────────────────────
 
 WRITE_VERBS = {
@@ -191,9 +317,25 @@ WRITE_VERBS = {
 
 def handle_command(body: str, cfg: dict) -> str:
     body  = body.strip()
-    lower = body.lower()
     task  = cfg['task']
     maxl  = int(cfg.get('max_output', 40))
+
+    # ── @ context shortcuts ───────────────────────────────────────────────────
+    if body.startswith('@'):
+        return handle_at_command(body, task)
+
+    # ── dot shortcuts — resolve leading dots to task ID/UUID ──────────────────
+    parts = body.split(None, 1)
+    leading = parts[0]
+    if leading in DOT_LABELS:
+        resolved, label = resolve_dot(leading, task)
+        if resolved is None:
+            return label   # error message
+        body  = (resolved + ' ' + parts[1]) if len(parts) > 1 else resolved
+        parts = body.split(None, 1)
+        # fall through with substituted body
+
+    lower = body.lower()
 
     if lower in ('help', '?', 'h'):
         return HELP_TEXT
@@ -225,20 +367,198 @@ def handle_command(body: str, cfg: dict) -> str:
     return run_task(task, body.split() + ['list'], maxl)
 
 
+# ── Context display name ──────────────────────────────────────────────────────
+
+def get_active_context(task_bin: str) -> str:
+    """Return the active Taskwarrior context string, e.g. 'need,tod', or '' if none."""
+    try:
+        result = subprocess.run(
+            [task_bin, 'rc.hooks=off', '_get', 'rc.context'],
+            capture_output=True, text=True, timeout=5,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return ''
+
+
+def format_displayname(base: str, context: str) -> str:
+    """Format bot display name, e.g. 'taskbot' or 'taskbot @cmx:need,tod'."""
+    if context:
+        return f'{base} @cmx:{context}'
+    return base
+
+
+# ── Location context ─────────────────────────────────────────────────────────
+#
+# Config entries in matrix-taskbot.rc:
+#   location_context = yes                         # yes/no toggle (default: yes)
+#
+#   # Positive zone: inside radius → context active
+#   location.home  = 51.5074,-0.1278,200,home      # within 200m → @+home
+#   location.work  = 51.5000,-0.1200,300,work
+#
+#   # Negative zone: outside radius → context active
+#   location.out   = 51.5074,-0.1278,-200,out      # beyond 200m of home → @+out
+#
+#   # Catch-all: context_name only, no coordinates — fires when nothing else matches
+#   location.other = out
+#
+# Priority: positive zones → negative zones → catch-all
+# On entering a zone:  @+ added to cmx set
+# On leaving all zones: @- removed from cmx set
+#
+# Supports:
+#   - Static location share  (m.room.message / msgtype m.location)
+#   - MSC3488 live beacons   (org.matrix.msc3488.beacon / m.beacon)
+
+def parse_locations(cfg: dict) -> dict:
+    """Parse location.* entries from config.
+
+    Returns:
+        {
+          'positive': {name: {lat, lon, radius, context}},  # inside radius
+          'negative': {name: {lat, lon, radius, context}},  # outside radius
+          'catchall': context_name or None,                 # no coordinates
+        }
+    """
+    positive, negative = {}, {}
+    catchall = None
+    for key, val in cfg.items():
+        if not key.startswith('location.'):
+            continue
+        name  = key[9:]
+        parts = [p.strip() for p in val.split(',')]
+        if len(parts) == 1:
+            # Catch-all: location.other = context_name
+            catchall = parts[0]
+        elif len(parts) >= 4:
+            try:
+                lat    = float(parts[0])
+                lon    = float(parts[1])
+                radius = float(parts[2])
+                ctx    = parts[3]
+                entry  = {'lat': lat, 'lon': lon, 'radius': abs(radius), 'context': ctx}
+                if radius < 0:
+                    negative[name] = entry
+                else:
+                    positive[name] = entry
+            except (ValueError, IndexError):
+                debug_log(f'location: malformed entry "{key}={val}" — skipped')
+        else:
+            debug_log(f'location: unrecognised format "{key}={val}" — skipped')
+    return {'positive': positive, 'negative': negative, 'catchall': catchall}
+
+
+def parse_geo_uri(uri: str) -> 'tuple[float, float] | None':
+    """Parse geo:lat,lon or geo:lat,lon;u=N → (lat, lon) or None."""
+    if not uri.startswith('geo:'):
+        return None
+    try:
+        coords = uri[4:].split(';')[0]
+        lat, lon = coords.split(',')[:2]
+        return float(lat), float(lon)
+    except (ValueError, IndexError):
+        return None
+
+
+def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in metres (Haversine)."""
+    R  = 6_371_000
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a  = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def nearest_location_ctx(lat: float, lon: float, locations: dict) -> 'str | None':
+    """Return the best-matching context for (lat, lon), or None.
+
+    Priority:
+      1. Positive zones  — inside radius
+      2. Negative zones  — outside radius (inverted match)
+      3. Catch-all       — no coordinates, fires when nothing else matched
+    """
+    for loc in locations['positive'].values():
+        if haversine_m(lat, lon, loc['lat'], loc['lon']) <= loc['radius']:
+            return loc['context']
+    for loc in locations['negative'].values():
+        if haversine_m(lat, lon, loc['lat'], loc['lon']) > loc['radius']:
+            return loc['context']
+    return locations.get('catchall')
+
+
+def cmx_op(at_cmd: str, task_bin: str):
+    """Run tw @+/-context for side-effect only (no output capture needed)."""
+    if TW_BIN.exists():
+        subprocess.run(['python3', str(TW_BIN), at_cmd],
+                       capture_output=True, timeout=15)
+    else:
+        # Fallback: bare task context switch (no cmx, but better than nothing)
+        ctx = at_cmd.lstrip('@+-')
+        op  = at_cmd[1] if len(at_cmd) > 1 and at_cmd[1] in '+-' else None
+        if op is None:
+            subprocess.run([task_bin, 'rc.hooks=off', 'context', ctx],
+                           capture_output=True, timeout=10)
+
+
 # ── Bot ───────────────────────────────────────────────────────────────────────
 
 async def run_bot(cfg: dict, creds: dict):
-    from nio import AsyncClient, RoomMessageText, InviteEvent, InviteMemberEvent
+    from nio import AsyncClient, RoomMessageText, InviteEvent, InviteMemberEvent, UnknownEvent
 
     allowed = {u.strip() for u in cfg['allowed_users'].split(',') if u.strip()}
+
+    # Derive display name base from config or bot_user localpart (@name:server → name)
+    bot_name = cfg.get('bot_name', '').strip()
+    if not bot_name:
+        localpart = cfg['bot_user'].lstrip('@').split(':')[0]
+        bot_name = localpart if localpart else 'taskbot'
+
+    # Location context setup
+    location_enabled = cfg.get('location_context', 'yes').lower() in ('yes', 'true', '1')
+    locations        = parse_locations(cfg) if location_enabled else {}
+    loc_state        = {'active_ctx': None}   # context name currently held by location
 
     client            = AsyncClient(cfg['homeserver'], cfg['bot_user'])
     client.access_token = creds['access_token']
     client.device_id    = creds['device_id']
     client.user_id      = cfg['bot_user']
 
+    async def update_displayname():
+        ctx  = get_active_context(cfg['task'])
+        name = format_displayname(bot_name, ctx)
+        debug_log(f'setting display name: {name!r}')
+        await client.set_displayname(name)
+
+    async def apply_location(room_id: str, lat: float, lon: float):
+        """Compute nearest zone, apply @+/- cmx ops, notify room on change."""
+        if not location_enabled or not (locations['positive'] or locations['negative'] or locations['catchall']):
+            return
+        ctx  = nearest_location_ctx(lat, lon, locations)
+        prev = loc_state['active_ctx']
+        if ctx == prev:
+            debug_log(f'location: still in {ctx!r} — no change')
+            return
+        msgs = []
+        if prev:
+            cmx_op(f'@-{prev}', cfg['task'])
+            msgs.append(f'left {prev}')
+        if ctx:
+            cmx_op(f'@+{ctx}', cfg['task'])
+            msgs.append(f'entered {ctx}')
+        loc_state['active_ctx'] = ctx
+        debug_log(f'location context: {prev!r} → {ctx!r}')
+        notice = '[location] ' + ', '.join(msgs)
+        await client.room_send(
+            room_id      = room_id,
+            message_type = 'm.room.message',
+            content      = {'msgtype': 'm.text', 'body': notice},
+        )
+        await update_displayname()
+
     async def on_message(room, event):
-        debug_log(f'message from {event.sender} in {room.room_id}: {event.body!r}')
         if not isinstance(event, RoomMessageText):
             return
         if event.sender == cfg['bot_user']:
@@ -246,12 +566,50 @@ async def run_bot(cfg: dict, creds: dict):
         if allowed and event.sender not in allowed:
             debug_log(f'ignored: {event.sender} not in allowed_users')
             return
+
+        # Static location share (m.location) — handle before command dispatch
+        content = event.source.get('content', {})
+        if content.get('msgtype') == 'm.location':
+            geo_uri = content.get('geo_uri', '')
+            debug_log(f'static location from {event.sender}: {geo_uri}')
+            latlon = parse_geo_uri(geo_uri)
+            if latlon:
+                await apply_location(room.room_id, *latlon)
+            return
+
+        debug_log(f'message from {event.sender}: {event.body!r}')
         reply = handle_command(event.body, cfg)
         await client.room_send(
             room_id      = room.room_id,
             message_type = 'm.room.message',
             content      = {'msgtype': 'm.text', 'body': reply},
         )
+        await update_displayname()
+
+    async def on_unknown(room, event):
+        """Handle MSC3488 live location beacon events."""
+        if event.sender == cfg['bot_user']:
+            return
+        if allowed and event.sender not in allowed:
+            return
+        src     = event.source
+        etype   = src.get('type', '')
+        content = src.get('content', {})
+
+        # Beacon types: MSC3488 draft and stable names
+        if etype not in ('org.matrix.msc3488.beacon', 'm.beacon'):
+            return
+
+        # Location field varies slightly between draft and stable
+        loc = content.get('org.matrix.msc3488.location') or content.get('m.location') or {}
+        geo_uri = loc.get('uri', '') if isinstance(loc, dict) else ''
+        if not geo_uri:
+            return
+
+        debug_log(f'live beacon from {event.sender}: {geo_uri}')
+        latlon = parse_geo_uri(geo_uri)
+        if latlon:
+            await apply_location(room.room_id, *latlon)
 
     pending_joins = set()
 
@@ -281,12 +639,27 @@ async def run_bot(cfg: dict, creds: dict):
         debug_log(f'event: {type(event).__name__} from {event.sender} in {room.room_id}')
 
     client.add_event_callback(on_message, RoomMessageText)
+    client.add_event_callback(on_unknown, UnknownEvent)
     client.add_event_callback(on_any,     NioEvent)
     client.add_event_callback(on_invite,  InviteEvent)
     client.add_event_callback(on_invite,  InviteMemberEvent)
 
     print(f'[matrix-taskbot] v{VERSION} running as {cfg["bot_user"]}')
     print(f'[matrix-taskbot] allowed users: {cfg["allowed_users"] or "(anyone)"}')
+    if location_enabled:
+        nzones   = len(locations['positive']) + len(locations['negative'])
+        catchall = locations.get('catchall')
+        if nzones or catchall:
+            parts = []
+            if nzones:
+                parts.append(f'{nzones} zone(s)')
+            if catchall:
+                parts.append(f'catch-all={catchall!r}')
+            print(f'[matrix-taskbot] location context: {", ".join(parts)}')
+        else:
+            print(f'[matrix-taskbot] location context: enabled but no zones defined in rc')
+    else:
+        print(f'[matrix-taskbot] location context: disabled')
 
     # Initial sync — collect pending invites, then join after sync completes
     await client.sync(timeout=30_000, full_state=True)
@@ -295,6 +668,9 @@ async def run_bot(cfg: dict, creds: dict):
         pending_joins.add(room_id)
     await do_pending_joins()
     debug_log(f'joined rooms: {list(client.rooms.keys())}')
+
+    # Set display name to reflect current context
+    await update_displayname()
 
     debug_log('sync_forever starting...')
     await client.sync_forever(timeout=30_000, full_state=True)
